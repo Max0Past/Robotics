@@ -1,0 +1,5 @@
+setup.py
+Robotics_Algorithms_Course.egg-info/PKG-INFO
+Robotics_Algorithms_Course.egg-info/SOURCES.txt
+Robotics_Algorithms_Course.egg-info/dependency_links.txt
+Robotics_Algorithms_Course.egg-info/top_level.txt
