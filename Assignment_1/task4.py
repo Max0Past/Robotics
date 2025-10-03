@@ -21,15 +21,108 @@ MAX_SPEED = np.deg2rad(1.5)
 # EN: Your code for IK and drawing goes here.                                         #
 
 def forward_kinematics(arm: RoboticArm, angles=None):
-    return np.array([3., 3.])
+    """
+    Calculate the end-effector position based on joint angles.
+    """
+    base_position = np.array(arm.joints[0].position)
+    link_lengths = np.array(arm.link_lengths)
+    angles = np.array(angles if angles is not None else arm.get_angles())
 
-def jacobian(link_lengths, link_angles):
-    jacobian_matrix = np.zeros((2, len(link_angles)))
+    cumulative_angles = np.cumsum(angles)
+    deltas = np.stack([link_lengths * np.cos(cumulative_angles),
+                       link_lengths * np.sin(cumulative_angles)], axis=-1)
+
+    return base_position + deltas.sum(axis=0)
+
+def jacobian(arm: RoboticArm, angles=None):
+    """
+    Compute the Jacobian matrix for the robotic arm.
+    """
+    angles = np.array(angles if angles is not None else arm.get_angles())
+    link_lengths = np.array(arm.link_lengths)
+    base_position = np.array(arm.joints[0].position)
+
+    cumulative_angles = np.cumsum(angles)
+    joint_positions = np.vstack([base_position, base_position + np.cumsum(
+        np.stack([link_lengths * np.cos(cumulative_angles),
+                  link_lengths * np.sin(cumulative_angles)], axis=-1), axis=0)])
+
+    end_effector_pos = joint_positions[-1]
+    vecs = end_effector_pos - joint_positions[:-1]
+
+    jacobian_matrix = np.zeros((2, len(link_lengths)))
+    jacobian_matrix[0, :] = -vecs[:, 1]
+    jacobian_matrix[1, :] = vecs[:, 0]
+
     return jacobian_matrix
 
-def inverse_kinematics(target_position, arm):
-    angles = arm.get_angles()
-    return angles
+def null_space_projection(J):
+    """
+    Compute the projection matrix onto the null space of the Jacobian.
+    """
+    J_pinv = np.linalg.pinv(J)
+    return np.eye(J.shape[1]) - J_pinv @ J
+
+def inverse_kinematics(target_position, arm: RoboticArm, initial_angles_guess=None, secondary_objective=None):
+    """
+    Perform inverse kinematics to find joint angles for a target position.
+    """
+    max_iterations = 200
+    tolerance = 0.01
+    damping = 0.8
+    alpha_secondary = 0.1
+
+    current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles())
+
+    for _ in range(max_iterations):
+        current_pos = forward_kinematics(arm, current_angles)
+        error = target_position - current_pos
+
+        if np.linalg.norm(error) < tolerance:
+            break
+
+        J = jacobian(arm, current_angles)
+        J_T = J.T
+        inv_term = np.linalg.inv(J @ J_T + np.eye(2) * (damping**2))
+        delta_theta_primary = J_T @ inv_term @ error
+
+        if secondary_objective is not None:
+            delta_theta_secondary = alpha_secondary * null_space_projection(J) @ secondary_objective
+            current_angles += delta_theta_primary + delta_theta_secondary
+        else:
+            current_angles += delta_theta_primary
+
+    return current_angles
+
+def manipulability_gradient(arm: RoboticArm, angles):
+    """
+    Compute the gradient of manipulability for the robotic arm.
+    """
+    epsilon = 1e-6
+    J = jacobian(arm, angles)
+    manipulability = np.sqrt(np.linalg.det(J @ J.T))
+
+    grad = np.zeros(len(angles))
+    for i in range(len(angles)):
+        angles_plus = angles.copy()
+        angles_plus[i] += epsilon
+        manipulability_plus = np.sqrt(np.linalg.det(jacobian(arm, angles_plus) @ jacobian(arm, angles_plus).T))
+        grad[i] = (manipulability_plus - manipulability) / epsilon
+
+    return grad
+
+def joint_limit_avoidance_gradient(angles, joint_limits, weight=1.0):
+    """
+    Compute the gradient to avoid joint limits.
+    """
+    grad = -weight * (angles - np.mean(joint_limits, axis=1)) / (np.ptp(joint_limits, axis=1) ** 2)
+    return grad
+
+def interpolate_points(point1, point2, num_steps):
+    """
+    Generate intermediate points between two points for smoother transitions.
+    """
+    return np.linspace(point1, point2, num_steps, endpoint=False)[1:]
 
 #######################################################################################
 #######################################################################################

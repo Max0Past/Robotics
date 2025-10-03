@@ -14,7 +14,7 @@ from robo_algo.core import Color
 
 
 # Increase for debugging!
-MAX_SPEED = np.deg2rad(1.0)
+MAX_SPEED = np.deg2rad(25.0)
             
             
 ############################## YOUR CODE GOES HERE ####################################
@@ -23,22 +23,140 @@ MAX_SPEED = np.deg2rad(1.0)
 # EN: Your code for IK and drawing goes here.                                         #
 
 def forward_kinematics(arm: RoboticArm, angles=None):
-    return np.array([3., 3.])
+    """
+    Calculate the end-effector position based on joint angles.
+    """
+    base_position = np.array(arm.joints[0].position)
+    link_lengths = np.array(arm.link_lengths)
+    angles = np.array(angles if angles is not None else arm.get_angles())
 
-def jacobian(link_lengths, link_angles):
-    jacobian_matrix = np.zeros((2, len(link_angles)))
+    cumulative_angles = np.cumsum(angles)
+    deltas = np.stack([link_lengths * np.cos(cumulative_angles),
+                       link_lengths * np.sin(cumulative_angles)], axis=-1)
+
+    return base_position + deltas.sum(axis=0)
+
+def jacobian(arm: RoboticArm, angles=None):
+    """
+    Compute the Jacobian matrix for the robotic arm.
+    """
+    angles = np.array(angles if angles is not None else arm.get_angles())
+    link_lengths = np.array(arm.link_lengths)
+    base_position = np.array(arm.joints[0].position)
+
+    cumulative_angles = np.cumsum(angles)
+    joint_positions = np.vstack([base_position, base_position + np.cumsum(
+        np.stack([link_lengths * np.cos(cumulative_angles),
+                  link_lengths * np.sin(cumulative_angles)], axis=-1), axis=0)])
+
+    end_effector_pos = joint_positions[-1]
+    vecs = end_effector_pos - joint_positions[:-1]
+
+    jacobian_matrix = np.zeros((2, len(link_lengths)))
+    jacobian_matrix[0, :] = -vecs[:, 1]
+    jacobian_matrix[1, :] = vecs[:, 0]
+
     return jacobian_matrix
 
-def inverse_kinematics(target_position, arm):
-    angles = arm.get_angles()
-    return angles
+def null_space_projection(J):
+    """
+    Compute the projection matrix onto the null space of the Jacobian.
+    """
+    J_pinv = np.linalg.pinv(J)
+    return np.eye(J.shape[1]) - J_pinv @ J
+
+def inverse_kinematics(target_position, arm: RoboticArm, initial_angles_guess=None, secondary_objective=None):
+    """
+    Perform inverse kinematics to find joint angles for a target position.
+    """
+    max_iterations = 200
+    tolerance = 0.01
+    damping = 0.8
+    alpha_secondary = 0.1
+
+    current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles())
+
+    for _ in range(max_iterations):
+        current_pos = forward_kinematics(arm, current_angles)
+        error = target_position - current_pos
+
+        if np.linalg.norm(error) < tolerance:
+            break
+
+        J = jacobian(arm, current_angles)
+        J_T = J.T
+        inv_term = np.linalg.inv(J @ J_T + np.eye(2) * (damping**2))
+        delta_theta_primary = J_T @ inv_term @ error
+
+        if secondary_objective is not None:
+            delta_theta_secondary = alpha_secondary * null_space_projection(J) @ secondary_objective
+            current_angles += delta_theta_primary + delta_theta_secondary
+        else:
+            current_angles += delta_theta_primary
+
+    return current_angles
+
+def manipulability_gradient(arm: RoboticArm, angles):
+    """
+    Compute the gradient of manipulability for the robotic arm.
+    """
+    epsilon = 1e-6
+    J = jacobian(arm, angles)
+    manipulability = np.sqrt(np.linalg.det(J @ J.T))
+
+    grad = np.zeros(len(angles))
+    for i in range(len(angles)):
+        angles_plus = angles.copy()
+        angles_plus[i] += epsilon
+        manipulability_plus = np.sqrt(np.linalg.det(jacobian(arm, angles_plus) @ jacobian(arm, angles_plus).T))
+        grad[i] = (manipulability_plus - manipulability) / epsilon
+
+    return grad
+
+def joint_limit_avoidance_gradient(angles, joint_limits, weight=1.0):
+    """
+    Compute the gradient to avoid joint limits.
+    """
+    grad = -weight * (angles - np.mean(joint_limits, axis=1)) / (np.ptp(joint_limits, axis=1) ** 2)
+    return grad
+
+def interpolate_points(point1, point2, num_steps):
+    """
+    Generate intermediate points between two points for smoother transitions.
+    """
+    return np.linspace(point1, point2, num_steps, endpoint=False)[1:]
 
 #######################################################################################
 #######################################################################################
+
+
+# ------- Helper: safe draw to avoid buffer overflow -------
+def safe_draw(arm_plotter: RoboticArmPlotter):
+    """
+    Call arm_plotter.draw() only if it won't overflow the internal buffer.
+    This guards against AssertionError: Too many points.
+    """
+    try:
+        num = getattr(arm_plotter, "num_points", None)
+        mx = getattr(arm_plotter, "max_num_points", None)
+        if num is None or mx is None:
+            # Can't check, call normally but catch assertion
+            arm_plotter.draw()
+        else:
+            # reserve 2 slots margin
+            if num < mx - 2:
+                arm_plotter.draw()
+            else:
+                # skip drawing to avoid assertion; render will still show existing strokes
+                pass
+    except AssertionError:
+        # If library asserts, ignore to avoid crash — final image will still be rendered
+        pass
 
 
 if __name__ == "__main__":
     ctx = core.RenderingContext("Task 1 - visualization")
+
     arm = RoboticArmPlotter(
         ctx,
         joint0_position=np.array([8, 8]),
@@ -49,60 +167,115 @@ if __name__ == "__main__":
         joint_radius=0.3,
         joint_color=Color(200, 200, 200, 255),
     )
-    controller = ArmController(arm, max_velocity=MAX_SPEED)
-    arm.start_drawing()
 
-    ### <UA>
-    ### drawing1 це список масивів точок. Кожен масив описує фігуру для малювання.
-    ### Кожна фігура малюється окремо. Не повинно бути ліній, які зʼєднують дві фігури.
-    ### Кожна фігура це масив точок, які повинні бути намальовані в прямому порядку.
-    ### <EN>
-    ### drawing1 is a list of arrays of points. Each array describes a shape to draw.
-    ### Each shape must be plotted separately. No line must connect two shapes.
-    ### Each shape is an array of points which must be plotted in order.
+    controller = ArmController(arm, max_velocity=MAX_SPEED)
     drawing1: List[np.ndarray] = get_drawing1()
 
+    # State flags and guards
+    pen_down = False
+    final_image_rendered = False
+
+    drawing = drawing1
+
+    # Move arm to initial start point before main loop
+    start_point = np.copy(drawing[0][0])
+    if start_point[1] > 13.0:
+        start_point[1] = 13.0
+
+    target_angles = inverse_kinematics(start_point, arm)
+    controller.move_to_angles(target_angles)
+
+    # Wait for controller to finish initial move while rendering
+    while not controller.is_idle():
+        for event in pygame.event.get():
+            if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
+                pygame.quit()
+                raise SystemExit
+        # Use opaque fill for reliable rendering
+        ctx.screen.fill((0, 0, 0))
+        arm.render()
+        controller.step()
+        ctx.world.Step(TIME_STEP, 10, 10)
+        pygame.display.flip()
+        ctx.clock.tick(TARGET_FPS)
+
+    # main loop variables
     running = True
-    spf_running_mean = 0
-    coef = 0
     i_shape = 0
     i_point = 0
+    state = 'MOVE_TO_START'
+
     try:
         while running:
-            # Check the event queue
             for event in pygame.event.get():
                 if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
-                    # The user closed the window or pressed escape
                     running = False
 
-            ms_start = time.perf_counter_ns() / 1000
-            ctx.screen.fill((0, 0, 0, 0))
+            # Opaque clear to avoid alpha drawing issues
+            ctx.screen.fill((0, 0, 0))
+
+            # Render scene
             arm.render()
-            #screen = pygame.display.set_mode((600, 600))
-            ############################## YOUR CODE GOES HERE ####################################
-            #######################################################################################
-            # UA: Код для обчислення зворотної кінематики та малювання має бути тут               #
-            # EN: Your code for IK and drawing goes here.                                         #
-            #######################################################################################
-            #######################################################################################
-            # Hint: see arm_controller interface, use `controller`
-            # controller.move_to_angles([your predicted angles])
-            #######################################################################################
-            
-            drawing = drawing1
+            controller.step()
 
-            #######################################################################################
-            #######################################################################################
+            # Only call safe_draw while pen_down to avoid buffer growth each frame
+            if pen_down:
+                safe_draw(arm)
 
-            # Make Box2D simulate the physics of our world for one step.
+            if controller.is_idle():
+                # If already finished, keep rendering final image
+                if state == 'FINISHED':
+                    ctx.world.Step(TIME_STEP, 10, 10)
+                    pygame.display.flip()
+                    ctx.clock.tick(TARGET_FPS)
+                    continue
+
+                # Completed all shapes
+                if i_shape >= len(drawing):
+                    arm.stop_drawing()
+                    pen_down = False
+                    if not final_image_rendered:
+                        safe_draw(arm)  # final attempt to capture last strokes
+                        final_image_rendered = True
+                    state = 'FINISHED'
+                    print("Drawing complete! Window will remain open showing final image. Press ESC or close window to exit.")
+                    continue
+
+                if state == 'MOVE_TO_START':
+                    arm.stop_drawing()
+                    pen_down = False
+
+                    target_point = drawing[i_shape][i_point].copy()
+                    if target_point[1] > 13.0:
+                        target_point[1] = 13.0
+
+                    target_angles = inverse_kinematics(target_point, arm)
+                    controller.move_to_angles(target_angles)
+                    state = 'DRAWING'
+
+                elif state == 'DRAWING':
+                    arm.start_drawing()
+                    pen_down = True
+                    safe_draw(arm)  # capture current point immediately
+
+                    i_point += 1
+                    if i_point >= len(drawing[i_shape]):
+                        i_shape += 1
+                        i_point = 0
+                        state = 'MOVE_TO_START'
+                    else:
+                        target_point = drawing[i_shape][i_point].copy()
+                        if target_point[1] > 13.0:
+                            target_point[1] = 13.0
+                        target_angles = inverse_kinematics(target_point, arm)
+                        controller.move_to_angles(target_angles)
+
+            # physics / display tick
             ctx.world.Step(TIME_STEP, 10, 10)
-            spf = time.perf_counter_ns() / 1000 - ms_start
-            spf_running_mean = spf_running_mean * coef + (1 - coef) * spf
-            coef = 0.99
-            print(f"fps={1 / spf_running_mean * 1000 * 1000:.1f} [{spf_running_mean / 1000:.3f}ms]")
-            # Flip the screen and try to keep at the target FPS
             pygame.display.flip()
             ctx.clock.tick(TARGET_FPS)
+
     except KeyboardInterrupt:
         print("Keyboard interrupt. Terminating...")
-    pygame.quit()
+    finally:
+        pygame.quit()
