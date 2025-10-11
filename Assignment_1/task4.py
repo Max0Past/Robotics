@@ -1,5 +1,6 @@
 from typing import List, Optional, Sequence
 import time
+import sys
 
 import numpy as np
 import pygame
@@ -11,7 +12,6 @@ from robo_algo.constants import *
 import robo_algo.core as core
 from robo_algo.core import Color, ColorGreen
 
-
 # Increase for debugging!
 MAX_SPEED = np.deg2rad(2.0)
 
@@ -20,12 +20,7 @@ MAX_SPEED = np.deg2rad(2.0)
 # UA: Код для обчислення кінематики має бути тут                                        #
 # EN: Your code for IK and drawing goes here.                                           #
 
-
 def forward_kinematics(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
-    """
-    Повертає позицію кінцевого ефектора (2D) для заданих кутів
-    arm: об'єкт з атрибутами joints (list з позицією бази), link_lengths, get_angles()
-    """
     base_position = np.array(arm.joints[0].position, dtype=float)
     link_lengths = np.array(arm.link_lengths, dtype=float)
     angles = np.array(angles if angles is not None else arm.get_angles(), dtype=float)
@@ -40,9 +35,6 @@ def forward_kinematics(arm, angles: Optional[Sequence[float]] = None) -> np.ndar
 
 
 def jacobian(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
-    """
-    Обчислює 2 x n Якобіан для planar manipulator
-    """
     angles = np.array(angles if angles is not None else arm.get_angles(), dtype=float)
     link_lengths = np.array(arm.link_lengths, dtype=float)
     base_position = np.array(arm.joints[0].position, dtype=float)
@@ -66,7 +58,7 @@ def jacobian(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
 
 def null_space_projection_from_pinv(J: np.ndarray) -> np.ndarray:
     """
-    Проєкція у нуль-простір використовуючи псевдоінверсу (повертає n x n матрицю)
+    Проєкція у нуль-простір використовуючи псевдоінверс (повертає n x n матрицю)
     """
     J_pinv = np.linalg.pinv(J)
     return np.eye(J.shape[1]) - J_pinv @ J
@@ -90,10 +82,6 @@ def manipulability_value(J: np.ndarray) -> float:
 
 
 def joint_limit_avoidance_gradient(angles: np.ndarray, joint_limits: Sequence[Sequence[float]], weight: float = 1.0) -> np.ndarray:
-    """
-    Градієнт для уникнення лімітів (симетрична функція, що штовхає кути до середини інтервалу)
-    joint_limits: список [min, max] на кожен суглоб (радіани)
-    """
     joint_limits = np.array(joint_limits, dtype=float)
     mid = np.mean(joint_limits, axis=1)
     span = joint_limits[:, 1] - joint_limits[:, 0]
@@ -103,19 +91,18 @@ def joint_limit_avoidance_gradient(angles: np.ndarray, joint_limits: Sequence[Se
 
 
 def clamp_per_joint(delta: np.ndarray, max_per_joint: np.ndarray) -> np.ndarray:
-    """Обмежує зміни кутів по-суглобово для плавності руху"""
     return np.clip(delta, -max_per_joint, max_per_joint)
 
 
 # -------------------------
-# Головна інверсна кінематика
+# Головна інверсна кінематика з можливістю вибору методу
 # -------------------------
-
 def inverse_kinematics(target_position: Sequence[float],
                          arm,
                          joint_limits: Optional[Sequence[Sequence[float]]] = None,
                          initial_angles_guess: Optional[Sequence[float]] = None,
                          *,
+                         method: str = "dls",  # 'dls' | 'pinv' | 'nr'
                          max_iterations: int = 200,
                          tolerance: float = 5e-3,
                          base_damping: float = 1e-2,
@@ -123,14 +110,18 @@ def inverse_kinematics(target_position: Sequence[float],
                          alpha_secondary: float = 0.08,
                          max_delta_deg_per_iter: float = 2.0) -> np.ndarray:
     """
-    Інверсна кінематика з обмеженнями:
-    - SVD-damped pseudoinverse
-    - адаптивний дампер залежно від маніпулябільності
-    - другорядна ціль: уникнення лімітів (проектується в нуль-простір)
-    - per-joint clamp для плавності руху
+    Інверсна кінематика з вибором методу:
+      - method='dls'  : SVD-damped pseudoinverse (adaptive damping)
+      - method='pinv' : Moore-Penrose pseudoinverse (np.linalg.pinv)
+      - method='nr'   : Newton–Raphson / Gauss–Newton style: solve (J^T J + lambda I)^{-1} J^T e
 
     Повертає масив кутів (в радіанах)
     """
+    method = method.lower()
+    allowed = ("dls", "pinv", "nr")
+    if method not in allowed:
+        raise ValueError(f"Unknown IK method '{method}'. Allowed: {allowed}")
+
     target = np.array(target_position, dtype=float)
     current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles(), dtype=float)
     n = len(current_angles)
@@ -148,19 +139,48 @@ def inverse_kinematics(target_position: Sequence[float],
         manip = manipulability_value(J)
         adapt_damping = base_damping + (1.0 / (manip + 1e-6)) * 0.01  # +eps для стабільності
 
-        J_pinv = damped_pinv(J, adapt_damping)  # n x 2
-        delta_theta_primary = J_pinv @ error  # n-vector
+        # Primary step depending on method
+        if method == "dls":
+            # SVD-damped pseudoinverse (adaptive damping)
+            J_pinv = damped_pinv(J, adapt_damping)
+            delta_theta_primary = J_pinv @ error  # n-vector
+
+        elif method == "pinv":
+            # Moore-Penrose pseudoinverse
+            J_pinv = np.linalg.pinv(J)
+            delta_theta_primary = J_pinv @ error
+
+        elif method == "nr":
+            # Newton / Gauss-Newton style: solve (J^T J + lambda I)^{-1} J^T e
+            JTJ = J.T @ J  # (n, n)
+            JT_e = J.T @ error  # (n,)
+            lambda_nr = 1e-6 + (1.0 / (manip + 1e-6)) * 1e-3  # small adaptive regularizer
+            try:
+                delta_theta_primary = np.linalg.solve(JTJ + lambda_nr * np.eye(n), JT_e)
+                # For null-space projection later we still may need pinv:
+                J_pinv = np.linalg.pinv(J)
+            except np.linalg.LinAlgError:
+                # If singular -> fallback to pinv
+                J_pinv = np.linalg.pinv(J)
+                delta_theta_primary = J_pinv @ error
+        else:
+            # should not happen due to check above
+            J_pinv = np.linalg.pinv(J)
+            delta_theta_primary = J_pinv @ error
 
         delta = alpha_primary * delta_theta_primary
 
-        # другорядне завдання: уникнення лімітів — тільки коли маніпулябільність не занадто мала
+        # second task: joint limits avoidance projected into null-space (use pinv for projection)
         if manip > 1e-6 and joint_limits is not None:
             sec_obj = joint_limit_avoidance_gradient(current_angles, joint_limits, weight=1.0)
+            # Ensure we have J_pinv for projection (compute if not set)
+            if 'J_pinv' not in locals():
+                J_pinv = np.linalg.pinv(J)
             null_proj = np.eye(n) - J_pinv @ J
             delta_theta_secondary = null_proj @ sec_obj
             delta += alpha_secondary * delta_theta_secondary
 
-        # обмежуємо по-суглобово для гладкості
+        # clamp per-joint for smoothness
         delta = clamp_per_joint(delta, max_delta_per_joint)
         current_angles = current_angles + delta
 
@@ -169,10 +189,35 @@ def inverse_kinematics(target_position: Sequence[float],
 #######################################################################################
 #######################################################################################
 
+def _choose_method_interactive():
+    """
+    Просте консольне меню вибору методу IK.
+    Повертає рядок: 'dls' | 'pinv' | 'nr'
+    """
+    choices = {
+        "1": ("dls", "SVD-damped pseudoinverse (DLS) — стабільний біля сингулярностей"),
+        "2": ("pinv", "Moore–Penrose pseudoinverse (np.linalg.pinv) — класичний псевдоінверс"),
+        "3": ("nr", "Newton–Raphson / Gauss–Newton style (solve (J^T J + λI)^{-1} J^T e)")
+    }
+    print("Choose IK solver method before starting simulation:")
+    for k, (code, desc) in choices.items():
+        print(f"  {k}. {code} — {desc}")
+    selected = None
+    while selected not in choices:
+        selected = input("Enter 1/2/3 and press Enter: ").strip()
+        if selected not in choices:
+            print("Invalid choice. Choose 1, 2 or 3.")
+    method = choices[selected][0]
+    print(f"Selected IK method: {method}")
+    return method
+
 
 if __name__ == "__main__":
+    # Request method from user BEFORE creating the rendering context
+    solver_method = _choose_method_interactive()
+
     # --- 1. Налаштування сцени та руки ---
-    ctx = core.RenderingContext("Task 4 - Simplified IK Solver")
+    ctx = core.RenderingContext("Task 4 - Simplified IK Solver (method: {})".format(solver_method))
     arm = RoboticArmPlotter(
         ctx,
         joint0_position=np.array([8, 8]),
@@ -204,22 +249,25 @@ if __name__ == "__main__":
 
             # Використовуємо контролер для плавного руху до цілі
             if controller.is_idle():
-                controller.move_to_angles(
-                    inverse_kinematics(
+                try:
+                    target_angles = inverse_kinematics(
                         target_position=target_point,
                         arm=arm,
                         joint_limits=np.deg2rad([[-180, 180]] * len(arm.link_lengths)),
-                        initial_angles_guess=arm.get_angles()
+                        initial_angles_guess=arm.get_angles(),
+                        method=solver_method
                     )
-                )
-
-            controller.step()
+                    controller.move_to_angles(target_angles)
+                except Exception as e:
+                    print(f"IK solver error: {e}", file=sys.stderr)
+            else:
+                controller.step()
 
             # --- 3. Рендеринг ---
             ctx.screen.fill((0, 0, 0, 0))
 
             # Відображення тексту та цілі
-            text_surface = my_font.render(f"Target: {target_point[0]:.2f}, {target_point[1]:.2f}", 
+            text_surface = my_font.render(f"Method: {solver_method}  Target: {target_point[0]:.2f}, {target_point[1]:.2f}",
                                           True, (255, 255, 255), (0, 0, 0))
             ctx.screen.blit(text_surface, (40, 40))
             pygame.draw.circle(ctx.screen, ColorGreen, center=core.to_pix(target_point), radius=15)
