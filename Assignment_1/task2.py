@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional, Sequence
 import time
 
 import numpy as np
@@ -13,90 +13,161 @@ import robo_algo.core as core
 from robo_algo.core import Color
 
 
-# Increase this value for debugging
+# Збільшіть це значення для налагодження
 MAX_SPEED = np.deg2rad(10.0)
 
-############################## YOUR CODE GOES HERE ####################################
+############################## ВАШ КОД ТУТ ####################################
 #######################################################################################
 # UA: Код для обчислення кінематики має бути тут               #
 # EN: Your code for IK and drawing goes here.                                         #
-def forward_kinematics(arm: RoboticArm, angles=None):
+def forward_kinematics(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
     """
-    Calculate the end-effector position based on joint angles.
+    Повертає позицію кінцевого ефектора (2D) для заданих кутів
+    arm: об'єкт з атрибутами joints (list з позицією бази), link_lengths, get_angles()
     """
-    base_position = np.array(arm.joints[0].position)
-    link_lengths = np.array(arm.link_lengths)
-    angles = np.array(angles if angles is not None else arm.get_angles())
+    base_position = np.array(arm.joints[0].position, dtype=float)
+    link_lengths = np.array(arm.link_lengths, dtype=float)
+    angles = np.array(angles if angles is not None else arm.get_angles(), dtype=float)
 
     cumulative_angles = np.cumsum(angles)
-    deltas = np.stack([link_lengths * np.cos(cumulative_angles),
-                       link_lengths * np.sin(cumulative_angles)], axis=-1)
+    deltas = np.stack([
+        link_lengths * np.cos(cumulative_angles),
+        link_lengths * np.sin(cumulative_angles)
+    ], axis=-1)
 
     return base_position + deltas.sum(axis=0)
 
-def jacobian(arm: RoboticArm, angles=None):
+
+def jacobian(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
     """
-    Compute the Jacobian matrix for the robotic arm.
+    Обчислює 2 x n Якобіан для планарного маніпулятора
     """
-    angles = np.array(angles if angles is not None else arm.get_angles())
-    link_lengths = np.array(arm.link_lengths)
-    base_position = np.array(arm.joints[0].position)
+    angles = np.array(angles if angles is not None else arm.get_angles(), dtype=float)
+    link_lengths = np.array(arm.link_lengths, dtype=float)
+    base_position = np.array(arm.joints[0].position, dtype=float)
 
     cumulative_angles = np.cumsum(angles)
-    joint_positions = np.vstack([base_position, base_position + np.cumsum(
+    joint_positions_vectors = np.cumsum(
         np.stack([link_lengths * np.cos(cumulative_angles),
-                  link_lengths * np.sin(cumulative_angles)], axis=-1), axis=0)])
+                  link_lengths * np.sin(cumulative_angles)], axis=-1), axis=0)
+    joint_positions = base_position + joint_positions_vectors
 
+    joint_origins = np.vstack([base_position, joint_positions[:-1]])
     end_effector_pos = joint_positions[-1]
-    vecs = end_effector_pos - joint_positions[:-1]
+    vecs = end_effector_pos - joint_origins  # форма (n, 2)
 
-    jacobian_matrix = np.zeros((2, len(link_lengths)))
-    jacobian_matrix[0, :] = -vecs[:, 1]
-    jacobian_matrix[1, :] = vecs[:, 0]
+    J = np.zeros((2, len(link_lengths)), dtype=float)
+    # колонка i: векторний добуток (p_ee - p_i) x z_hat -> результат у площині: [-y, x]
+    J[0, :] = -vecs[:, 1]
+    J[1, :] = vecs[:, 0]
+    return J
 
-    return jacobian_matrix
 
-def null_space_projection(J):
+def null_space_projection_from_pinv(J: np.ndarray) -> np.ndarray:
     """
-    Compute the projection matrix onto the null space of the Jacobian.
+    Проєкція у нуль-простір використовуючи псевдоінверсію
     """
     J_pinv = np.linalg.pinv(J)
     return np.eye(J.shape[1]) - J_pinv @ J
 
-def inverse_kinematics(target_position, arm: RoboticArm, initial_angles_guess=None, secondary_objective=None):
-    """
-    Perform inverse kinematics to find joint angles for a target position.
-    """
-    max_iterations = 200
-    tolerance = 0.01
-    damping = 0.8
-    alpha_secondary = 0.1
 
-    current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles())
+def damped_pinv(J: np.ndarray, damping: float) -> np.ndarray:
+    """
+    SVD-заглушена псевдоінверсія (повертає n x m матрицю)
+    Стійкіше біля сингулярностей ніж np.linalg.pinv з малим дампером
+    """
+    U, S, Vt = np.linalg.svd(J, full_matrices=False)
+    S_damped = S / (S**2 + damping**2)
+    return Vt.T @ np.diag(S_damped) @ U.T
 
-    for _ in range(max_iterations):
+
+def manipulability_value(J: np.ndarray) -> float:
+    """Маніпулябельність: sqrt(det(J J^T)) (>=0)"""
+    JJt = J @ J.T
+    det = np.linalg.det(JJt)
+    return float(np.sqrt(max(0.0, det)))
+
+
+def joint_limit_avoidance_gradient(angles: np.ndarray, joint_limits: Sequence[Sequence[float]], weight: float = 1.0) -> np.ndarray:
+    """
+    Градієнт для уникнення обмежень суглобів (симетрична функція, що штовхає кути до середини інтервалу)
+    joint_limits: список [min, max] на кожен суглоб (радіани)
+    """
+    joint_limits = np.array(joint_limits, dtype=float)
+    mid = np.mean(joint_limits, axis=1)
+    span = joint_limits[:, 1] - joint_limits[:, 0]
+    span[span == 0] = 1.0
+    grad = -weight * (angles - mid) / (span ** 2)
+    return grad
+
+
+def clamp_per_joint(delta: np.ndarray, max_per_joint: np.ndarray) -> np.ndarray:
+    """Обмежує зміни кутів по-суглобово."""
+    return np.clip(delta, -max_per_joint, max_per_joint)
+
+
+# -------------------------
+# Головна інверсна кінематика
+# -------------------------
+
+def inverse_kinematics(target_position: Sequence[float],
+                         arm,
+                         joint_limits: Optional[Sequence[Sequence[float]]] = None,
+                         initial_angles_guess: Optional[Sequence[float]] = None,
+                         *,
+                         max_iterations: int = 200,
+                         tolerance: float = 5e-3,
+                         base_damping: float = 1e-2,
+                         alpha_primary: float = 0.35,
+                         alpha_secondary: float = 0.08,
+                         max_delta_deg_per_iter: float = 2.0) -> np.ndarray:
+    """
+    Інверсна кінематика з обмеженнями:
+    - SVD-заглушена псевдоінверсія
+    - адаптивний дампер залежно від маніпулябельності
+    - другорядна ціль: уникнення обмежень (проектується в нуль-простір)
+    - по-суглобове обмеження для плавності руху
+
+    Повертає масив кутів (в радіанах)
+    """
+    target = np.array(target_position, dtype=float)
+    current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles(), dtype=float)
+    n = len(current_angles)
+    joint_limits = np.array(joint_limits) if joint_limits is not None else np.vstack([[-np.pi, np.pi]] * n)
+    max_delta_per_joint = np.full(n, np.deg2rad(max_delta_deg_per_iter))
+
+    for it in range(max_iterations):
         current_pos = forward_kinematics(arm, current_angles)
-        error = target_position - current_pos
-
-        if np.linalg.norm(error) < tolerance:
+        error = target - current_pos
+        err_norm = np.linalg.norm(error)
+        if err_norm < tolerance:
             break
 
-        J = jacobian(arm, current_angles)
-        J_T = J.T
-        inv_term = np.linalg.inv(J @ J_T + np.eye(2) * (damping**2))
-        delta_theta_primary = J_T @ inv_term @ error
+        J = jacobian(arm, current_angles)  # (2, n)
+        manip = manipulability_value(J)
+        adapt_damping = base_damping + (1.0 / (manip + 1e-6)) * 0.01  # +eps для стабільності
 
-        if secondary_objective is not None:
-            delta_theta_secondary = alpha_secondary * null_space_projection(J) @ secondary_objective
-            current_angles += delta_theta_primary + delta_theta_secondary
-        else:
-            current_angles += delta_theta_primary
+        J_pinv = damped_pinv(J, adapt_damping)  # n x 2
+        delta_theta_primary = J_pinv @ error  # n-вектор
+
+        delta = alpha_primary * delta_theta_primary
+
+        # другорядне завдання: уникнення обмежень — тільки коли маніпулябельність не занадто мала
+        if manip > 1e-6 and joint_limits is not None:
+            sec_obj = joint_limit_avoidance_gradient(current_angles, joint_limits, weight=1.0)
+            null_proj = np.eye(n) - J_pinv @ J
+            delta_theta_secondary = null_proj @ sec_obj
+            delta += alpha_secondary * delta_theta_secondary
+
+        # обмежуємо по-суглобово для гладкості
+        delta = clamp_per_joint(delta, max_delta_per_joint)
+        current_angles = current_angles + delta
 
     return current_angles
 
 def manipulability_gradient(arm: RoboticArm, angles):
     """
-    Compute the gradient of manipulability for the robotic arm.
+    Обчислює градієнт маніпулябельності для роботизованої руки
     """
     epsilon = 1e-6
     J = jacobian(arm, angles)
@@ -113,19 +184,20 @@ def manipulability_gradient(arm: RoboticArm, angles):
 
 def joint_limit_avoidance_gradient(angles, joint_limits, weight=1.0):
     """
-    Compute the gradient to avoid joint limits.
+    Обчислює градієнт для уникнення обмежень суглобів
     """
     grad = -weight * (angles - np.mean(joint_limits, axis=1)) / (np.ptp(joint_limits, axis=1) ** 2)
     return grad
 
 def interpolate_points(point1, point2, num_steps):
     """
-    Generate intermediate points between two points for smoother transitions.
+    Генерує проміжні точки між двома точками для плавніших переходів.
     """
     return np.linspace(point1, point2, num_steps, endpoint=False)[1:]
 
 #######################################################################################
 #######################################################################################
+
 
 def safe_draw(arm_plotter: RoboticArmPlotter):
     # Допоміжна функція для безпечного виклику методу малювання
@@ -141,7 +213,7 @@ def safe_draw(arm_plotter: RoboticArmPlotter):
 
 
 if __name__ == "__main__":
-    ctx = core.RenderingContext("Task 2 - visualization")
+    ctx = core.RenderingContext("Завдання 2 - візуалізація")
 
     arm = RoboticArmPlotter(
         ctx,
@@ -157,13 +229,13 @@ if __name__ == "__main__":
     controller = ArmController(arm, max_velocity=MAX_SPEED)
     drawing2: List[np.ndarray] = get_drawing2()
 
-    # State flags and guards
+    # Прапори стану та захисти
     pen_down = False
     final_image_rendered = False
 
     drawing = drawing2
 
-    # Move arm to initial start point before main loop
+    # Переміщуємо руку до початкової точки перед основним циклом
     start_point = np.copy(drawing[0][0])
     if start_point[1] > 13.0:
         start_point[1] = 13.0
@@ -171,13 +243,13 @@ if __name__ == "__main__":
     target_angles = inverse_kinematics(start_point, arm)
     controller.move_to_angles(target_angles)
 
-    # Wait for controller to finish initial move while rendering
+    # Чекаємо, поки контролер завершить початковий рух, одночасно рендерячи
     while not controller.is_idle():
         for event in pygame.event.get():
             if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
                 pygame.quit()
                 raise SystemExit
-        # Use opaque fill for reliable rendering
+        # Використовуємо непрозоре заповнення для надійного рендерингу
         ctx.screen.fill((0, 0, 0))
         arm.render()
         controller.step()
@@ -185,7 +257,7 @@ if __name__ == "__main__":
         pygame.display.flip()
         ctx.clock.tick(TARGET_FPS)
 
-    # main loop variables
+    # змінні основного циклу
     running = True
     i_shape = 0
     i_point = 0
@@ -197,34 +269,34 @@ if __name__ == "__main__":
                 if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
                     running = False
 
-            # Opaque clear to avoid alpha drawing issues
+            # Непрозоре очищення для уникнення проблем з альфа-каналом
             ctx.screen.fill((0, 0, 0))
 
-            # Render scene
+            # Рендер сцени
             arm.render()
             controller.step()
 
-            # Only call safe_draw while pen_down to avoid buffer growth each frame
+            # Викликаємо safe_draw лише якщо pen_down, щоб уникнути зростання буфера кожного кадру
             if pen_down:
                 safe_draw(arm)
 
             if controller.is_idle():
-                # If already finished, keep rendering final image
+                # Якщо вже завершено, продовжуємо рендерити фінальне зображення
                 if state == 'FINISHED':
                     ctx.world.Step(TIME_STEP, 10, 10)
                     pygame.display.flip()
                     ctx.clock.tick(TARGET_FPS)
                     continue
 
-                # Completed all shapes
+                # Завершено всі фігури
                 if i_shape >= len(drawing):
                     arm.stop_drawing()
                     pen_down = False
                     if not final_image_rendered:
-                        safe_draw(arm)  # final attempt to capture last strokes
+                        safe_draw(arm)  # фінальна спроба захопити останні штрихи
                         final_image_rendered = True
                     state = 'FINISHED'
-                    print("Drawing complete! Window will remain open showing final image. Press ESC or close window to exit.")
+                    print("Малювання завершено! Вікно залишиться відкритим, показуючи фінальне зображення. Натисніть ESC або закрийте вікно, щоб вийти.")
                     continue
 
                 if state == 'MOVE_TO_START':
@@ -242,7 +314,7 @@ if __name__ == "__main__":
                 elif state == 'DRAWING':
                     arm.start_drawing()
                     pen_down = True
-                    safe_draw(arm)  # capture current point immediately
+                    safe_draw(arm)  # захоплюємо поточну точку негайно
 
                     i_point += 1
                     if i_point >= len(drawing[i_shape]):
@@ -256,12 +328,12 @@ if __name__ == "__main__":
                         target_angles = inverse_kinematics(target_point, arm)
                         controller.move_to_angles(target_angles)
 
-            # physics / display tick
+            # фізика / оновлення дисплея
             ctx.world.Step(TIME_STEP, 10, 10)
             pygame.display.flip()
             ctx.clock.tick(TARGET_FPS)
 
     except KeyboardInterrupt:
-        print("Keyboard interrupt. Terminating...")
+        print("Переривання з клавіатури. Завершення...")
     finally:
         pygame.quit()

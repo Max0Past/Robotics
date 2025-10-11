@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional, Sequence
 import time
 
 import numpy as np
@@ -21,141 +21,158 @@ MAX_SPEED = np.deg2rad(2.0)
 # EN: Your code for IK and drawing goes here.                                           #
 
 
-def forward_kinematics(arm: RoboticArm, angles=None):
+def forward_kinematics(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
     """
-    Calculate the end-effector position based on joint angles.
+    Повертає позицію кінцевого ефектора (2D) для заданих кутів
+    arm: об'єкт з атрибутами joints (list з позицією бази), link_lengths, get_angles()
     """
-    base_position = np.array(arm.joints[0].position)
-    link_lengths = np.array(arm.link_lengths)
-    angles = np.array(angles if angles is not None else arm.get_angles())
+    base_position = np.array(arm.joints[0].position, dtype=float)
+    link_lengths = np.array(arm.link_lengths, dtype=float)
+    angles = np.array(angles if angles is not None else arm.get_angles(), dtype=float)
 
     cumulative_angles = np.cumsum(angles)
-    deltas = np.stack([link_lengths * np.cos(cumulative_angles),
-                       link_lengths * np.sin(cumulative_angles)], axis=-1)
+    deltas = np.stack([
+        link_lengths * np.cos(cumulative_angles),
+        link_lengths * np.sin(cumulative_angles)
+    ], axis=-1)
 
     return base_position + deltas.sum(axis=0)
 
 
-def jacobian(arm: RoboticArm, angles=None):
+def jacobian(arm, angles: Optional[Sequence[float]] = None) -> np.ndarray:
     """
-    Compute the Jacobian matrix for the robotic arm.
+    Обчислює 2 x n Якобіан для planar manipulator
     """
-    angles = np.array(angles if angles is not None else arm.get_angles())
-    link_lengths = np.array(arm.link_lengths)
-    base_position = np.array(arm.joints[0].position)
+    angles = np.array(angles if angles is not None else arm.get_angles(), dtype=float)
+    link_lengths = np.array(arm.link_lengths, dtype=float)
+    base_position = np.array(arm.joints[0].position, dtype=float)
 
     cumulative_angles = np.cumsum(angles)
-    # The positions of the end of each link (which is the start of the next joint)
     joint_positions_vectors = np.cumsum(
         np.stack([link_lengths * np.cos(cumulative_angles),
                   link_lengths * np.sin(cumulative_angles)], axis=-1), axis=0)
     joint_positions = base_position + joint_positions_vectors
 
-    # We need positions of joint origins, which includes the base
     joint_origins = np.vstack([base_position, joint_positions[:-1]])
-
     end_effector_pos = joint_positions[-1]
-    vecs = end_effector_pos - joint_origins
+    vecs = end_effector_pos - joint_origins  # shape (n, 2)
 
-    jacobian_matrix = np.zeros((2, len(link_lengths)))
-    # The i-th column is the cross-product of (p_ee - p_i) with the z-axis
-    jacobian_matrix[0, :] = -vecs[:, 1]
-    jacobian_matrix[1, :] = vecs[:, 0]
+    J = np.zeros((2, len(link_lengths)), dtype=float)
+    # колонка i: крос-продукт (p_ee - p_i) x z_hat -> результат у площині: [-y, x]
+    J[0, :] = -vecs[:, 1]
+    J[1, :] = vecs[:, 0]
+    return J
 
-    return jacobian_matrix
 
-
-def null_space_projection(J):
+def null_space_projection_from_pinv(J: np.ndarray) -> np.ndarray:
     """
-    Compute the projection matrix onto the null space of the Jacobian.
+    Проєкція у нуль-простір використовуючи псевдоінверсу (повертає n x n матрицю)
     """
-    # Use pseudo-inverse for numerical stability
     J_pinv = np.linalg.pinv(J)
     return np.eye(J.shape[1]) - J_pinv @ J
 
 
-def inverse_kinematics(target_position, arm: RoboticArm, initial_angles_guess=None, secondary_objective=None):
+def damped_pinv(J: np.ndarray, damping: float) -> np.ndarray:
     """
-    Perform inverse kinematics to find joint angles for a target position.
-    Uses damped least squares for stability and allows a null-space secondary objective.
-    NOTE: This is a full solver, good for testing but not for real-time control.
+    SVD-damped pseudoinverse (повертає n x m матрицю)
+    Стійкіше біля сингулярностей ніж np.linalg.pinv з малим дампером
     """
-    max_iterations = 200
-    tolerance = 0.01
-    damping = 0.1 # Reduced damping for the full solver
-    alpha_primary = 0.5 # Learning rate
-    alpha_secondary = 0.1
-
-    current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles())
-
-    for _ in range(max_iterations):
-        current_pos = forward_kinematics(arm, current_angles)
-        error = target_position - current_pos
-
-        if np.linalg.norm(error) < tolerance:
-            break
-
-        J = jacobian(arm, current_angles)
-        J_T = J.T
-        
-        # Damped Least Squares
-        inv_term = np.linalg.inv(J @ J_T + np.eye(2) * (damping**2))
-        delta_theta_primary = J_T @ inv_term @ error
-
-        delta_theta = alpha_primary * delta_theta_primary
-
-        if secondary_objective is not None:
-            delta_theta_secondary = alpha_secondary * null_space_projection(J) @ secondary_objective
-            delta_theta += delta_theta_secondary
-        
-        current_angles += delta_theta
-
-    return current_angles
+    U, S, Vt = np.linalg.svd(J, full_matrices=False)
+    S_damped = S / (S**2 + damping**2)
+    return Vt.T @ np.diag(S_damped) @ U.T
 
 
-def manipulability_gradient(arm: RoboticArm, angles):
+def manipulability_value(J: np.ndarray) -> float:
+    """Маніпулябільність: sqrt(det(J J^T)) (>=0)"""
+    JJt = J @ J.T
+    det = np.linalg.det(JJt)
+    return float(np.sqrt(max(0.0, det)))
+
+
+def joint_limit_avoidance_gradient(angles: np.ndarray, joint_limits: Sequence[Sequence[float]], weight: float = 1.0) -> np.ndarray:
     """
-    Compute the gradient of manipulability for the robotic arm.
-    Numerical finite-difference approximation.
+    Градієнт для уникнення лімітів (симетрична функція, що штовхає кути до середини інтервалу)
+    joint_limits: список [min, max] на кожен суглоб (радіани)
     """
-    epsilon = 1e-6
-    J = jacobian(arm, angles)
-    # Ensure determinant is non-negative before sqrt
-    det_val = np.linalg.det(J @ J.T)
-    manipulability = np.sqrt(max(0.0, det_val))
-
-    grad = np.zeros(len(angles))
-    for i in range(len(angles)):
-        angles_plus = angles.copy()
-        angles_plus[i] += epsilon
-        J_plus = jacobian(arm, angles_plus)
-        det_val_plus = np.linalg.det(J_plus @ J_plus.T)
-        manipulability_plus = np.sqrt(max(0.0, det_val_plus))
-        grad[i] = (manipulability_plus - manipulability) / epsilon
-
-    return grad
-
-
-def joint_limit_avoidance_gradient(angles, joint_limits, weight=1.0):
-    """
-    Compute the gradient to avoid joint limits.
-    joint_limits expected shape: (n_joints, 2) with [min, max] per joint.
-    """
-    joint_limits = np.array(joint_limits)
+    joint_limits = np.array(joint_limits, dtype=float)
     mid = np.mean(joint_limits, axis=1)
     span = joint_limits[:, 1] - joint_limits[:, 0]
-    # Avoid division by zero for fixed joints
     span[span == 0] = 1.0
     grad = -weight * (angles - mid) / (span ** 2)
     return grad
 
+
+def clamp_per_joint(delta: np.ndarray, max_per_joint: np.ndarray) -> np.ndarray:
+    """Обмежує зміни кутів по-суглобово для плавності руху"""
+    return np.clip(delta, -max_per_joint, max_per_joint)
+
+
+# -------------------------
+# Головна інверсна кінематика
+# -------------------------
+
+def inverse_kinematics(target_position: Sequence[float],
+                         arm,
+                         joint_limits: Optional[Sequence[Sequence[float]]] = None,
+                         initial_angles_guess: Optional[Sequence[float]] = None,
+                         *,
+                         max_iterations: int = 200,
+                         tolerance: float = 5e-3,
+                         base_damping: float = 1e-2,
+                         alpha_primary: float = 0.35,
+                         alpha_secondary: float = 0.08,
+                         max_delta_deg_per_iter: float = 2.0) -> np.ndarray:
+    """
+    Інверсна кінематика з обмеженнями:
+    - SVD-damped pseudoinverse
+    - адаптивний дампер залежно від маніпулябільності
+    - другорядна ціль: уникнення лімітів (проектується в нуль-простір)
+    - per-joint clamp для плавності руху
+
+    Повертає масив кутів (в радіанах)
+    """
+    target = np.array(target_position, dtype=float)
+    current_angles = np.array(initial_angles_guess if initial_angles_guess is not None else arm.get_angles(), dtype=float)
+    n = len(current_angles)
+    joint_limits = np.array(joint_limits) if joint_limits is not None else np.vstack([[-np.pi, np.pi]] * n)
+    max_delta_per_joint = np.full(n, np.deg2rad(max_delta_deg_per_iter))
+
+    for it in range(max_iterations):
+        current_pos = forward_kinematics(arm, current_angles)
+        error = target - current_pos
+        err_norm = np.linalg.norm(error)
+        if err_norm < tolerance:
+            break
+
+        J = jacobian(arm, current_angles)  # (2, n)
+        manip = manipulability_value(J)
+        adapt_damping = base_damping + (1.0 / (manip + 1e-6)) * 0.01  # +eps для стабільності
+
+        J_pinv = damped_pinv(J, adapt_damping)  # n x 2
+        delta_theta_primary = J_pinv @ error  # n-vector
+
+        delta = alpha_primary * delta_theta_primary
+
+        # другорядне завдання: уникнення лімітів — тільки коли маніпулябільність не занадто мала
+        if manip > 1e-6 and joint_limits is not None:
+            sec_obj = joint_limit_avoidance_gradient(current_angles, joint_limits, weight=1.0)
+            null_proj = np.eye(n) - J_pinv @ J
+            delta_theta_secondary = null_proj @ sec_obj
+            delta += alpha_secondary * delta_theta_secondary
+
+        # обмежуємо по-суглобово для гладкості
+        delta = clamp_per_joint(delta, max_delta_per_joint)
+        current_angles = current_angles + delta
+
+    return current_angles
 
 #######################################################################################
 #######################################################################################
 
 
 if __name__ == "__main__":
-    ctx = core.RenderingContext("Task 4 - visualization")
+    # --- 1. Налаштування сцени та руки ---
+    ctx = core.RenderingContext("Task 4 - Simplified IK Solver")
     arm = RoboticArmPlotter(
         ctx,
         joint0_position=np.array([8, 8]),
@@ -167,125 +184,54 @@ if __name__ == "__main__":
         joint_radius=0.3,
         joint_color=Color(200, 200, 200, 255),
     )
-    # The controller is not used in the fixed version, we set angles directly.
-    # We keep it for the `step` method which can be useful.
     controller = ArmController(arm, max_velocity=MAX_SPEED)
-    arm.start_drawing()
 
-    pygame.font.init() 
+    pygame.font.init()
     my_font = pygame.font.SysFont(pygame.font.get_default_font(), 30)
 
+    # --- 2. Основний цикл програми ---
     running = True
-    target_point = np.array([5., 5.])
-
-    # --- quick IK unit-test (prints to console) ---
-    try:
-        cur_angles = np.array(arm.get_angles())
-        ee = forward_kinematics(arm, cur_angles)
-        test_target = ee + np.array([0.5, -0.2])
-        sol = inverse_kinematics(test_target, arm, initial_angles_guess=cur_angles)
-        err = np.linalg.norm(forward_kinematics(arm, sol) - test_target)
-        print(f"IK quick-test error: {err:.4f}")
-    except Exception as e:
-        print("IK quick-test failed:", e)
-
     try:
         while running:
+            # Обробка подій (мишка, закриття вікна)
             for event in pygame.event.get():
                 if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
                     running = False
-                elif event.type == pygame.MOUSEMOTION:
-                    target_point = core.from_pix(np.array(event.dict['pos']))
-                elif event.type == MOUSEBUTTONDOWN:
-                    target_point = core.from_pix(np.array(event.dict['pos']))
 
+            # Отримуємо поточне положення курсора
+            mouse_pos = pygame.mouse.get_pos()
+            target_point = core.from_pix(np.array(mouse_pos))
+
+            # Використовуємо контролер для плавного руху до цілі
+            if controller.is_idle():
+                controller.move_to_angles(
+                    inverse_kinematics(
+                        target_position=target_point,
+                        arm=arm,
+                        joint_limits=np.deg2rad([[-180, 180]] * len(arm.link_lengths)),
+                        initial_angles_guess=arm.get_angles()
+                    )
+                )
+
+            controller.step()
+
+            # --- 3. Рендеринг ---
             ctx.screen.fill((0, 0, 0, 0))
 
-            text_surface = my_font.render(
-                f"Target: {target_point[0]:.2f}, {target_point[1]:.2f}",
-                True, (255, 255, 255), (0,0,0))
+            # Відображення тексту та цілі
+            text_surface = my_font.render(f"Target: {target_point[0]:.2f}, {target_point[1]:.2f}", 
+                                          True, (255, 255, 255), (0, 0, 0))
             ctx.screen.blit(text_surface, (40, 40))
             pygame.draw.circle(ctx.screen, ColorGreen, center=core.to_pix(target_point), radius=15)
+
+            # Рендеринг руки
             arm.render()
 
-            #######################################################################################
-            #            NEW, STABLE, VELOCITY-BASED IK CONTROL LOOP                              #
-            #######################################################################################
-
-            # 1) Get current state of the arm
-            current_angles = np.array(arm.get_angles())
-            current_pos = forward_kinematics(arm, current_angles)
-
-            # 2) Calculate the error vector (desired end-effector velocity)
-            error = target_point - current_pos
-            distance_to_target = np.linalg.norm(error)
-            
-            # Only move if we are not already at the target
-            if distance_to_target > 0.05: # tolerance
-                
-                # 3) Clamp target to reachable workspace
-                link_lengths = np.array(arm.link_lengths)
-                max_reach = link_lengths.sum()
-                base_pos = np.array(arm.joints[0].position)
-                dist_from_base = np.linalg.norm(target_point - base_pos)
-                
-                if dist_from_base > max_reach:
-                    # Clamp the target to the edge of the reachable circle
-                    vec_to_target = target_point - base_pos
-                    target_point = base_pos + vec_to_target * (max_reach / dist_from_base)
-                    # Recalculate error with clamped target
-                    error = target_point - current_pos
-
-                # 4) Compute Jacobian and Damped Least Squares for the primary task
-                J = jacobian(arm, current_angles)
-                damping = 0.2 # Damping factor for stability
-                inv_term = np.linalg.inv(J @ J.T + np.eye(2) * (damping**2))
-                delta_theta_primary = J.T @ inv_term @ error
-
-                # 5) Compute secondary objective (null-space motion)
-                # We want to maximize manipulability
-                manipulability_grad = manipulability_gradient(arm, current_angles)
-
-                # We could add other objectives like joint limit avoidance here
-                # joint_limit_grad = joint_limit_avoidance_gradient(...)
-                secondary_objective = manipulability_grad 
-                
-                # Project secondary objective onto the null space and scale it
-                alpha_secondary = 0.5 # How strongly we pursue the secondary objective
-                delta_theta_secondary = alpha_secondary * null_space_projection(J) @ secondary_objective
-
-                # 6) Combine primary and secondary objectives
-                delta_theta = delta_theta_primary + delta_theta_secondary
-                
-                # 7) Regulate speed: scale the angle change to not exceed MAX_SPEED
-                delta_norm = np.linalg.norm(delta_theta)
-                if delta_norm > MAX_SPEED:
-                    delta_theta = delta_theta * (MAX_SPEED / delta_norm)
-
-                # 8) Apply the calculated change in angles
-                new_angles = current_angles + delta_theta
-                arm.set_angles(new_angles.tolist())
-
-
-            # Visualization helpers
-            pygame.draw.line(ctx.screen, Color(200, 200, 0, 255), 
-                             core.to_pix(current_pos), 
-                             core.to_pix(target_point), 2)
-
-            try:
-                J = jacobian(arm, arm.get_angles())
-                manip = float(np.sqrt(max(0.0, np.linalg.det(J @ J.T))))
-                txt = my_font.render(f"Manipulability: {manip:.3f}", True, (255,255,255))
-                ctx.screen.blit(txt, (40, 80))
-            except Exception:
-                pass
-
-            #######################################################################################
-            #######################################################################################
-
+            # Оновлення екрану
             ctx.world.Step(TIME_STEP, 10, 10)
             pygame.display.flip()
             ctx.clock.tick(TARGET_FPS)
+
     except KeyboardInterrupt:
-        print("Keyboard interrupt. Terminating...")
+        print("Програму зупинено.")
     pygame.quit()
