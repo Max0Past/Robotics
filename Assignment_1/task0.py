@@ -25,32 +25,23 @@ def forward_kinematics(arm: RoboticArm, angles=None):
     # Find:
     end_effector_position = None
 
-    # --- Implementation Start ---
+    # --- Implementation Start (Improved Version) ---
     
-    # Initialize the position at the base of the arm.
-    current_position = np.copy(base_position)
+    # 1. Обчислюємо абсолютні кути для кожної ланки у світовій системі координат
+    #    np.cumsum([a, b, c]) -> [a, a+b, a+b+c]
+    cumulative_angles = np.cumsum(angles)
     
-    # This variable will hold the cumulative angle in the world frame.
-    cumulative_angle = 0.0
+    # 2. Обчислюємо зміщення (x, y) для кожної ланки
+    #    Ці операції застосовуються до кожного елемента масиву одночасно
+    delta_x = link_lengths * np.cos(cumulative_angles)
+    delta_y = link_lengths * np.sin(cumulative_angles)
     
-    # Iterate through each link and its corresponding joint angle.
-    for i in range(len(link_lengths)):
-        link_length = link_lengths[i]
-        joint_angle = angles[i]
-        
-        # The absolute angle of the current link is the sum of its
-        # angle and all preceding joint angles.
-        cumulative_angle += joint_angle
-        
-        # Calculate the (x, y) components of the current link's vector.
-        delta_x = link_length * np.cos(cumulative_angle)
-        delta_y = link_length * np.sin(cumulative_angle)
-        
-        # Add this vector to the current position to find the end of the link.
-        current_position[0] += delta_x
-        current_position[1] += delta_y
-        
-    end_effector_position = current_position
+    # 3. Складаємо вектор зміщень
+    #    np.sum() знаходить суму всіх зміщень по кожній осі.
+    total_delta = np.array([np.sum(delta_x), np.sum(delta_y)])
+    
+    # 4. Додаємо сумарне зміщення до базової позиції, щоб знайти кінцеву точку
+    end_effector_position = base_position + total_delta
     
     # --- Implementation End ---
     ############################################################
@@ -131,8 +122,8 @@ if __name__ == "__main__":
             else:
                 running = False
 
-            # Make Box2D simulate the physics of our world for one step.
-            ctx.world.Step(TIME_STEP, 10, 10)
+            # Make Box2D simulate the physics of our world for one step (збільшив для плавності)
+            ctx.world.Step(TIME_STEP, 20, 20)
 
             # Flip the screen and try to keep at the target FPS
             pygame.display.flip()
