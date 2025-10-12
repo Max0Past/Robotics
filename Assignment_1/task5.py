@@ -1,11 +1,6 @@
 import numpy as np
 import tqdm
-
-try:
-    import gymnasium as gym
-except ImportError:
-    print("Can't import gymansium. Tring to import gym...")
-    import gym
+import gymnasium as gym
 
 
 # Action constants.
@@ -38,12 +33,18 @@ class PolicyIteration:
         self.transition_probs = transition_probs
         self.states = states
         self.actions = actions
+        # Початкова стратегія залишається рівномірною
         self.policy = np.ones([len(self.states), len(self.actions)]) / len(self.actions)
 
     def pick_action(self, obs):
         ### Using a policy pick an action for the state `obs`
         ### Використовуючи стратегію обрати дію для стану `obs`
-        return np.argmax(self.policy[obs])
+        
+        # --- ЗМІНЕНО ТУТ ---
+        # Замість того, щоб завжди вибирати найкращу дію (argmax),
+        # ми вибираємо дію випадково, відповідно до ймовірностей у нашій стратегії.
+        # Це дозволяє агенту досліджувати середовище.
+        return np.random.choice(self.actions, p=self.policy[obs])
 
 
     def run(self):
@@ -53,57 +54,66 @@ class PolicyIteration:
         ### Зверніть увагу: | Note:
         ### [(prob, next_state, reward, terminate), ...] = transition_probability[state][action]
         ### prob = probability(next_state | state, action)
-        theta = 0.001
-        discount = 0.95
+        
+        # Гіперпараметри
+        theta = 1e-9  # Зробимо поріг трохи меншим для кращої точності
+        discount_factor = 0.99  # Коефіцієнт дисконтування для майбутніх винагород
 
-        # policy evaluation
-        def policy_evaluation(policy):
-            value_function = np.zeros(len(self.states))
+        # 1. Ініціалізація
+        value_function = np.zeros(len(self.states))
+
+        # Починаємо основний цикл алгоритму
+        while True:
+            # -- Крок 2: Оцінка стратегії (Policy Evaluation) --
             while True:
                 delta = 0
                 for state in self.states:
-                    v = 0
-                    for action, action_prob in enumerate(policy[state]):
-                        for prob, next_state, reward, term in self.transition_probs[state][action]:
-                            if term:
-                                v += action_prob * prob * reward
-                            else:
-                                v += action_prob * prob * (reward + discount * value_function[next_state])
-
-                    delta = max(delta, np.abs(v - value_function[state]))
-                    value_function[state] = v
+                    v = value_function[state]
+                    new_v = 0
+                    
+                    for action, action_prob in enumerate(self.policy[state]):
+                        for prob, next_state, reward, done in self.transition_probs[state][action]:
+                            # --- НЕВЕЛИКЕ ВИПРАВЛЕННЯ ТУТ ---
+                            # Додаємо `* (1-done)`, щоб цінність майбутніх станів не враховувалася, 
+                            # якщо гра закінчилася (агент впав в ополонку або дійшов до мети).
+                            new_v += action_prob * prob * (reward + discount_factor * value_function[next_state] * (1 - done))
+                    
+                    value_function[state] = new_v
+                    delta = max(delta, abs(v - value_function[state]))
 
                 if delta < theta:
                     break
-            return value_function
-    
-        # policy improvement
-        while True:
-            value_function = policy_evaluation(self.policy)
+
+            # -- Крок 3: Поліпшення стратегії (Policy Improvement) --
             policy_stable = True
             for state in self.states:
-                old_action = np.argmax(self.policy[state])
+                old_action_probs = np.copy(self.policy[state])
 
                 action_values = np.zeros(len(self.actions))
                 for action in self.actions:
-                    for prob, next_state, reward, term in self.transition_probs[state][action]:
-                        if term:
-                            action_values[action] += prob * reward
-                        else:   
-                            action_values[action] += prob * (reward + discount * value_function[next_state])
-
+                    for prob, next_state, reward, done in self.transition_probs[state][action]:
+                         # --- І ТУТ ТАКЕ САМЕ ВИПРАВЛЕННЯ ---
+                        action_values[action] += prob * (reward + discount_factor * value_function[next_state] * (1 - done))
+                
                 best_action = np.argmax(action_values)
-
-                if old_action != best_action:
+                
+                # Оновлюємо стратегію, роблячи її детермінованою (жадібною)
+                # на етапі поліпшення.
+                new_policy = np.eye(len(self.actions))[best_action]
+                self.policy[state] = new_policy
+                
+                # Перевіряємо, чи змінилася стратегія
+                if not np.array_equal(old_action_probs, self.policy[state]):
                     policy_stable = False
-                    self.policy[state] = np.eye(len(self.actions))[best_action]
-            
             
             if policy_stable:
                 break
 
-
+# --- РЕШТА КОДУ ЗАЛИШАЄТЬСЯ БЕЗ ЗМІН ---
 def task(env_name):
+    # Для FrozenLake краще використовувати неслизьку версію для налагодження,
+    # але для демонстрації стохастичності залишимо стандартну.
+    # env = gym.make(env_name, is_slippery=False)
     env = gym.make(env_name)
     transition_probability = env.unwrapped.P
     states = np.arange(env.unwrapped.observation_space.n)
@@ -116,13 +126,14 @@ def task(env_name):
     policy_iteration.run()
         
     rewards = []
-    for _ in tqdm.tqdm(range(100)):
+    # Запустимо більше епізодів для надійнішої статистики
+    for _ in tqdm.tqdm(range(500)):
         reward = play_episode(env, policy_iteration)
         rewards.append(reward)
     print(f"Average reward: {np.mean(rewards):.3f} (std={np.std(rewards):.3f})")
 
     env = gym.make(env_name, render_mode='human')
-    reward = play_episode(env, policy_iteration, render=True, iter_max=50)
+    reward = play_episode(env, policy_iteration, render=True, iter_max=100)
 
 
 if __name__ == "__main__":
