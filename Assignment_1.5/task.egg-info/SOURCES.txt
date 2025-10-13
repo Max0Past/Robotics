@@ -1,0 +1,14 @@
+setup.py
+task/__init__.py
+task/balloon.py
+task/cost.py
+task/dynamics.py
+task/human_player.py
+task/ilqr_player.py
+task/pid_player.py
+task/player.py
+task.egg-info/PKG-INFO
+task.egg-info/SOURCES.txt
+task.egg-info/dependency_links.txt
+task.egg-info/requires.txt
+task.egg-info/top_level.txt

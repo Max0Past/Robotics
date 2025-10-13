@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: task
+Version: 0.0.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: pygame>=2.5.1
+Requires-Dist: numba>=0.60.0
+Requires-Dist: scipy
+Dynamic: requires-dist
