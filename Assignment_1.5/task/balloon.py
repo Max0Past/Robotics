@@ -10,7 +10,6 @@ from typing import Optional, Union
 
 import numpy as np
 import pygame
-from pygame.locals import *
 
 from task.human_player import HumanPlayer
 
@@ -126,7 +125,7 @@ def balloon(fps, players, mass=1.0):
             "Score : " + str(player.target_counter), True, (255, 255, 255)
         )
         screen.blit(target_text, (position, 45))
-        if player.dead == True:
+        if player.dead:
             respawning_text = respawning_font.render(
                 "Respawning...", True, (255, 255, 255)
             )

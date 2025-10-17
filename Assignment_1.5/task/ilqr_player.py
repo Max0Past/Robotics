@@ -304,6 +304,8 @@ def backward_pass(
 
 class iLQRPlayer(Player):
     def __init__(self, dt, mass, gravity, Ixx, L, use_mpc=False):
+        self.ilqr = None
+        self.target_pos = None
         self.name = "iLQR" + ("_MPC" if use_mpc else "")
         self.alpha = 200
         self.anim_id = 3 if use_mpc else 2
