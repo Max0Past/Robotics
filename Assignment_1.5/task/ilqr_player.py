@@ -201,9 +201,10 @@ def rollout(f, C, Cf, x0, us):
     ###############################################
     # Compute xs[1:] and cost
     ###############################################
-    # YOUR CODE HERE
     for n in range(us.shape[0]):
-        pass
+        cost += C(xs[n], us[n])
+        xs[n+1] = f(xs[n], us[n])
+    cost += Cf(xs[-1])
     ###############################################
     return xs, cost
 
@@ -218,18 +219,19 @@ def forward_pass(f, C, Cf, xs, us, ks, Ks, alpha):
     Forward pass of iLQR given all the information and a full trajectory (plan + states).
     """
     xs_new = np.empty(xs.shape)
-
+    us_new = np.empty(us.shape)
     cost_new = 0.0
     xs_new[0] = xs[0]
-    us_new = us + alpha * ks
 
     ###############################################
     # Update us_new, compute xs_new and const_new here
     # Do not forget to add final cost
     ###############################################
-    # YOUR CODE HERE
     for n in range(us.shape[0]):
-        pass
+        us_new[n] = us[n] + alpha * ks[n] + Ks[n] @ (xs_new[n] - xs[n])
+        xs_new[n+1] = f(xs_new[n], us_new[n])
+        cost_new += C(xs_new[n], us_new[n])
+    cost_new += Cf(xs_new[-1])
     ###############################################
 
     return xs_new, us_new, cost_new
@@ -274,8 +276,11 @@ def backward_pass(
         ###############################################
         # Compute Q_x, Q_u, Q_xx, Q_ux, Q_uu
         ###############################################
-        # YOUR CODE HERE
-        Q_x, Q_u, Q_xx, Q_ux, Q_uu = None, None, None, None, None
+        Q_x = l_x + f_x.T @ V_x
+        Q_u = l_u + f_u.T @ V_x
+        Q_xx = l_xx + f_x.T @ V_xx @ f_x
+        Q_ux = l_ux + f_u.T @ V_xx @ f_x
+        Q_uu = l_uu + f_u.T @ V_xx @ f_u
         ###############################################
 
         # Compute gains with regularization. I provide the implementation
@@ -292,8 +297,8 @@ def backward_pass(
         ###############################################
         # Compute V_x, V_xx
         ###############################################
-        # YOUR CODE HERE
-        V_x, V_xx = None, None
+        V_x = Q_x + K.T @ Q_u + Q_ux.T @ k + K.T @ Q_uu @ k
+        V_xx = Q_xx + K.T @ Q_uu @ K + K.T @ Q_ux + Q_ux.T @ K
         ###############################################
 
         # expected cost reduction
@@ -329,9 +334,8 @@ class iLQRPlayer(Player):
         ###############################################
         # Implement self.use_mpc = True functionality.
         ###############################################
-        # YOUR CODE HERE
         if self.use_mpc:
-            pass
+            update_plan = True
         ###############################################
 
         if self.target_counter != self.prev_target_counter:

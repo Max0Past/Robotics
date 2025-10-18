@@ -88,7 +88,7 @@ class PIDPlayer(Player):
         self.x_pid = PID(0.2 / 3, 0, 0.2, 25, -25)
         self.angle_pid = PID(0.02 / 3, 0, 0.01 / 3, 1, -1)
         # cascade 2 (X)
-        self.y_pid = PID(2.5 / 3, 0, 1.5 / 3, 100, -100)
+        self.y_pid = PID(2.0, 0.5, 1.5, 100, -100)
         self.y_speed_pid = PID(-1 / 3, 0, 0, 1, -1)
 
     def act(self, obs):
