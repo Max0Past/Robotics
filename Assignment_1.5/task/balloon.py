@@ -118,7 +118,7 @@ def balloon(fps, players, mass=1.0):
 
     # Function to display info about a player
 
-    def display_info(position):
+    def display_info(player, position):
         name_text = name_font.render(player.name, True, (255, 255, 255))
         screen.blit(name_text, (position, 20))
         target_text = score_font.render(
@@ -137,9 +137,9 @@ def balloon(fps, players, mass=1.0):
     time_limit = 100
     respawn_timer_max = 3
 
-    # Generate 100 targets
+    # Generate 150 targets
     targets = []
-    for i in range(100):
+    for i in range(150):
         targets.append((randrange(200, 600), randrange(200, 600)))
 
     # Game loop
@@ -166,13 +166,18 @@ def balloon(fps, players, mass=1.0):
 
         # For each player
         for player_index, player in enumerate(players):
-            if player.dead:
+            if player.target_counter >= len(targets):
+                # Player has won, just let them exist
+                player.x_acceleration, player.y_acceleration, player.angular_acceleration = 0, 0, 0
+                player.x_speed, player.y_speed, player.angular_speed = 0, 0, 0
+                thruster_left, thruster_right = 0, 0
+            elif player.dead:
                 player.prev_target_counter = -1
                 if not hasattr(player, "thruster_left"):
                     player.thruster_left = 0
                     player.thruster_right = 0
 
-            if not player.dead:
+            if not player.dead and player.target_counter < len(targets):
                 # Calculate propeller force in function of input
                 if player.name == "PID":
                     thruster_left, thruster_right = player.act(
@@ -255,7 +260,7 @@ def balloon(fps, players, mass=1.0):
                 elif dist > 1000:
                     player.dead = True
                     player.respawn_timer = respawn_timer_max
-            else:
+            elif player.dead:
                 # Display respawn timer
                 if player.name == "Human":
                     respawn_text = respawn_timer_font.render(
@@ -295,21 +300,22 @@ def balloon(fps, players, mass=1.0):
                     )
 
             # Display target and player
-            target_sprite = target_animation[player.anim_id][
-                int(step * target_animation_speed) % len(target_animation)
-            ]
-            target_sprite.set_alpha(player.alpha)
-            screen.blit(
-                target_sprite,
-                (
-                    targets[player.target_counter][0]
-                    - int(target_sprite.get_width() / 2),
-                    targets[player.target_counter][1]
-                    - int(target_sprite.get_height() / 2),
-                ),
-            )
+            if player.target_counter < len(targets):
+                target_sprite = target_animation[player.anim_id % len(target_animation)][
+                    int(step * target_animation_speed) % len(target_animation)
+                ]
+                target_sprite.set_alpha(player.alpha)
+                screen.blit(
+                    target_sprite,
+                    (
+                        targets[player.target_counter][0]
+                        - int(target_sprite.get_width() / 2),
+                        targets[player.target_counter][1]
+                        - int(target_sprite.get_height() / 2),
+                    ),
+                )
 
-            player_sprite = player_animation[player.anim_id][
+            player_sprite = player_animation[player.anim_id % len(player_animation)][
                 int(step * player_animation_speed) % len(player_animation)
             ]
             player_copy = pygame.transform.rotate(player_sprite, player.angle)
@@ -333,14 +339,8 @@ def balloon(fps, players, mass=1.0):
             )
 
             # Display player info
-            if player_index == 0:
-                display_info(20)
-            elif player_index == 1:
-                display_info(130)
-            elif player_index == 2:
-                display_info(240)
-            elif player_index == 3:
-                display_info(350)
+            display_info(player, 20 + player_index * 150)
+
 
             time_text = time_font.render(
                 "Time : " + str(int(time_limit - time)), True, (255, 255, 255)
@@ -354,16 +354,26 @@ def balloon(fps, players, mass=1.0):
         pygame.display.update()
         FramePerSec.tick(FPS)
 
-    # Print scores and who won
-    print("")
+    # Print scores and determine winner(s)
+    print("\n--- Results ---")
     scores = []
     for player in players:
-        print(player.name + " collected : " + str(player.target_counter))
+        print(f"{player.name} collected: {player.target_counter}")
         scores.append(player.target_counter)
-    winner = players[np.argmax(scores)].name
+    
+    max_score = -1
+    if scores:
+        max_score = np.max(scores)
 
-    print("")
-    print("Winner is : " + winner + " !")
+    winners = [players[i].name for i, score in enumerate(scores) if score == max_score and max_score > -1]
+
+    print("\n--- Winners ---")
+    if not winners:
+        print("No winner.")
+    else:
+        for winner in winners:
+            print(f"- {winner}")
+    print("-----------------")
 
 
 def import_module_from_path(path: Union[str, Path], module_name: Optional[str] = None):
@@ -404,20 +414,22 @@ if __name__ == "__main__":
 
     if args.player_path:
         ilqr_player = import_module_from_path(Path(args.player_path) / "ilqr_player.py")
-        pid_player = import_module_from_path(Path(args.player_path) / "pid_player.py")
+        pid_player_module = import_module_from_path(Path(args.player_path) / "pid_player.py")
         iLQRPlayer = ilqr_player.iLQRPlayer
-        PIDPlayer = pid_player.PIDPlayer
+        PIDPlayer = pid_player_module.PIDPlayer
+        PID = pid_player_module.PID
     else:
         from task.ilqr_player import iLQRPlayer
         from task.pid_player import PIDPlayer
 
     if args.pid:
         players += [PIDPlayer()]
+
     if args.ilqr:
         players += [iLQRPlayer(dt, m, GRAVITY, Ixx, L, use_mpc=False)]
     if args.mpc:
         players += [iLQRPlayer(dt, m, GRAVITY, Ixx, L, use_mpc=True)]
-    if args.human or len(players) == 0:
+    if args.human:
         players += [HumanPlayer()]
 
     if args.fast:

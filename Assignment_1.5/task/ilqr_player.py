@@ -23,17 +23,18 @@ def goal_cost(target_pos, x_size=6, u_size=2):
     # C_xu = C_ux = 0
 
     M_diag = np.ones(x_size) * 100
-    M_diag[x_size // 2 :] = 10.0
+    M_diag[x_size // 2 :] = 5.0  # Middle ground penalty on velocity
     M = np.diag(M_diag)
 
     target_state = np.zeros(x_size)
     target_state[: len(target_pos)] = target_pos
 
-    C = lambda x, u: ((x - target_state).T @ M @ (x - target_state) + u.T @ u)
+    # Middle ground penalty on control usage
+    C = lambda x, u: ((x - target_state).T @ M @ (x - target_state) + 0.75 * u.T @ u)
     C_x = lambda x, u: 2 * M @ (x - target_state)
-    C_u = lambda x, u: 2 * u
+    C_u = lambda x, u: 2 * 0.75 * u
     C_xx = lambda x, u: 2 * M
-    C_uu = lambda x, u: 2 * np.eye(u_size)
+    C_uu = lambda x, u: 2 * 0.75 * np.eye(u_size)
     C_xu = lambda x, u: np.zeros((x_size, u_size))
     C_ux = lambda x, u: np.zeros((u_size, x_size))
 
