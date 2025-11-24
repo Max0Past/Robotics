@@ -1,19 +1,8 @@
-
-"""
-if [ ! -d "cifar-10-batches-py" ]
-then
-  wget http://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz -O cifar-10-python.tar.gz
-  tar -xzvf cifar-10-python.tar.gz
-  rm cifar-10-python.tar.gz
-fi
-"""
-
 import os
-import subprocess
-import warnings
-
 import numpy as np
 import pickle
+import urllib.request
+import tarfile
 
 ROOT_DIR = os.path.abspath(os.path.realpath(os.path.join(os.path.dirname(__file__), os.pardir)))
 
@@ -70,8 +59,8 @@ class CIFAR10:
         train_labels = trainval_labels[:CIFAR10.NUM_TRAIN]
         val_images = trainval_images[CIFAR10.NUM_TRAIN:]
         val_labels = trainval_labels[CIFAR10.NUM_TRAIN:]
-        test_images = trainval_images[:CIFAR10.NUM_TEST]
-        test_labels = trainval_labels[:CIFAR10.NUM_TEST]
+        test_images = test_images[:CIFAR10.NUM_TEST]
+        test_labels = test_labels[:CIFAR10.NUM_TEST]
 
         return train_images, train_labels, val_images, val_labels, test_images, test_labels
     
@@ -82,10 +71,16 @@ class CIFAR10:
         
         print("Downloading CIFAR10...")
         if not os.path.exists(self.tar_path):
-            subprocess.run(["wget", CIFAR10.URL, "-O", self.tar_path]).check_returncode()
+            # Use urllib instead of wget for cross-platform compatibility
+            print(f"Downloading from {CIFAR10.URL}...")
+            urllib.request.urlretrieve(CIFAR10.URL, self.tar_path)
+            print("Download complete.")
 
         print("Unpacking CIFAR10...")
-        subprocess.run(["tar", "-xvf", self.tar_path]).check_returncode()
+        # Use tarfile module instead of tar command
+        with tarfile.open(self.tar_path, 'r:gz') as tar:
+            tar.extractall(path=self.root)
+        print("Extraction complete.")
 
         print("Cleaning up...")
         os.remove(self.tar_path)
