@@ -81,7 +81,7 @@ def main():
                     # Малюємо рамку
                     cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 3)
                     cv2.putText(img, f"{current_detected_class} {int(conf*100)}%", 
-                                (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 
+                                (x1, y1 - 10), cv2.FONT_HERSHEY_PLAIN, 
                                 0.8, (255, 0, 255), 2)
 
         # --- GAME LOGIC ---
@@ -98,7 +98,7 @@ def main():
             
             if time_left > 0:
                 cv2.putText(img, str(int(time_left)+1), (600, 360), 
-                            cv2.FONT_HERSHEY_BOLD, 10, (255, 0, 255), 10)
+                            cv2.FONT_HERSHEY_PLAIN, 10, (255, 0, 255), 10)
             else:
                 # Час вийшов! Фіксуємо хід
                 state = "RESULT"
@@ -120,13 +120,13 @@ def main():
         elif state == "RESULT":
             # Показуємо хто що вибрав
             cv2.putText(img, f"You: {player_move}", (50, 100), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
+                        cv2.FONT_HERSHEY_PLAIN, 1.5, (255, 255, 255), 3)
             cv2.putText(img, f"AI: {ai_move}", (900, 100), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+                        cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 255), 3)
             
             # Хто переміг
             cv2.putText(img, result_text, (350, 360), 
-                        cv2.FONT_HERSHEY_BOLD, 4, result_color, 5)
+                        cv2.FONT_HERSHEY_PLAIN, 4, result_color, 5)
             
             cv2.putText(img, "Press SPACE to Restart", (400, 600), 
                         cv2.FONT_HERSHEY_PLAIN, 2, (200, 200, 200), 2)
