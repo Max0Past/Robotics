@@ -44,6 +44,8 @@ def main():
     cap = cv2.VideoCapture(0)
     cap.set(3, 1280) # Ширина
     cap.set(4, 720)  # Висота
+    
+    print(f"Камера відкрита: {cap.isOpened()}")
 
     # Змінні стану гри
     state = "WAITING" # Можливі стани: WAITING, COUNTDOWN, RESULT
@@ -60,6 +62,7 @@ def main():
         success, img = cap.read()
         if not success:
             print("Не вдалося отримати кадр з камери.")
+            print(f"Статус камери: {cap.isOpened()}")
             break
         
         # Віддзеркалення
@@ -177,18 +180,19 @@ def main():
             print("Вихід користувача...")
             break
         
-        if cv2.getWindowProperty("Rock Paper Scissors AI", cv2.WND_PROP_VISIBLE) < 1:
-            print("Вікно закрито.")
-            break
-            
         if key == 32: # Пробіл (SPACE)
             # Запускаємо таймер тільки якщо ми чекаємо або гра вже закінчилась
             if state == "WAITING" or state == "RESULT":
                 state = "COUNTDOWN"
                 timer_start = time.time()
-
+        
         # Показуємо фінальну картинку
         cv2.imshow("Rock Paper Scissors AI", img)
+        
+        # Перевіряємо, чи закрито вікно (має бути ПІСЛЯ imshow)
+        if cv2.getWindowProperty("Rock Paper Scissors AI", cv2.WND_PROP_VISIBLE) < 1:
+            print("Вікно закрито.")
+            break
 
     # Очистка ресурсів після виходу
     cap.release()
